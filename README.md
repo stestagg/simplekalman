@@ -46,7 +46,7 @@ We want an API where a user describes their problem in *plain measurement terms*
 A **Sensor** is a configured source of information:
 
 * it has an identity (`name`)
-* it declares what it measures (e.g. `"YAW"`, `"POSITION"`, `"POSE"`)
+* it declares what it measures (e.g. `"YAW"`, `"POSITION_2D"`, `"POSE_2D"`)
 * it declares its units (including delta/rate semantics)
 * it declares how noisy it is (standard deviation)
 * it optionally declares how to handle outliers / late data
@@ -56,9 +56,9 @@ It is an **abstract measurement stream**.
 
 Examples:
 
-* `"YAW" in deg/s` (yaw rate)
-* `"POSE" in m/sample` (delta pose per sample)
-* `"POSITION" in m` (absolute position)
+* `"YAW"` in `deg/s` (yaw rate)
+* `"POSE_2D"` in `m/sample` + `deg/sample` (delta pose per sample)
+* `"POSITION_2D"` in `m` (absolute position)
 
 ---
 
@@ -66,12 +66,12 @@ Examples:
 
 An **Observation** is one timestamped reading from a Sensor.
 
-It’s just data + metadata:
+It's just data + metadata:
 
-* time `t`
+* `time`
 * sensor name
-* measurement values
-* optional per-sample quality (accuracy, tracking quality, confidence)
+* measurement `values`
+* optional per-sample `accuracy` (can override sensor's default standard deviation)
 
 Observations are *events*. You pass them into the filter as they arrive.
 
@@ -194,6 +194,110 @@ If included, they should be:
 
 ---
 
+# Sensor specification design
+
+## Canonical internal model (what everything compiles to)
+
+User input compiles down to a fully explicit spec:
+
+```python
+SensorSpec(
+  name="arkit_delta_pose",
+  fields={
+    "x": FieldSpec(kind="distance", semantics="delta_per_sample", unit="m/sample", sigma=0.05),
+    "y": FieldSpec(kind="distance", semantics="delta_per_sample", unit="m/sample", sigma=0.05),
+    "yaw": FieldSpec(kind="angle", semantics="delta_per_sample", unit="rad/sample", sigma=0.5),
+  }
+)
+```
+
+Key: **field names exist even if the user didn't specify them**. For `measures="POSITION_2D"` you get default fields `x, y`. For `POSE_2D` default fields are `x, y, yaw`.
+
+The "sensor gives deltas" semantics isn't something the user must restate for each field — it's implied by the **measure schema** (and optionally reinforced by unit strings).
+
+## Measure schemas
+
+Each measure schema declares its fields with a `kind` per field:
+
+| Measure Schema | Fields |
+|----------------|--------|
+| `POSITION_2D` | `x(distance), y(distance)` |
+| `POSE_2D` | `x(distance), y(distance), yaw(angle)` |
+| `YAW` | `yaw(angle)` |
+
+Rate vs absolute vs delta is determined by units (e.g. `deg` vs `deg/s` vs `deg/sample`), not by the measure schema.
+
+This makes domain-map mode robust and keeps user code clean.
+
+## Three user input forms (compile-time sugar)
+
+### A) Single units + single sigma (broadcast)
+
+Good for homogeneous components:
+
+```python
+Sensor(name="gps", measures="POSITION_2D", units="m", standard_deviation=2.5)
+```
+
+Rules:
+
+* expand units to each field (`x, y`)
+* expand sigma to each field
+* semantics for each field comes from `measures` (absolute vs delta vs rate)
+
+### B) Domain map (distance vs angle, etc.)
+
+Good for mixed-dimension observations like pose:
+
+```python
+Sensor(
+  name="arkit_delta_pose",
+  measures="POSE_2D",
+  units={"distance": "m/sample", "angle": "rad/sample"},
+  standard_deviation={"distance": 0.05, "angle": 0.5},
+)
+```
+
+Rules:
+
+* each field has a `kind` (distance/angle/…); map applies by `kind`
+* if a field's kind is missing from the dict → error (or require a fallback)
+
+This is the sweet spot for "don't make me repeat it" while still supporting mixed-dimension observations.
+
+### C) Full per-field spec
+
+Power users / unusual sensors:
+
+```python
+Sensor(
+  name="arkit_delta_pose",
+  measures="POSE_2D",
+  fields={
+    "x": {"units": "m/sample", "standard_deviation": 0.03},
+    "y": {"units": "m/sample", "standard_deviation": 0.06},
+    "yaw": {"units": "rad/sample", "standard_deviation": 0.4},
+  },
+)
+```
+
+Rules:
+
+* explicit wins
+* you can still allow partial field specs with fallback to (A) or (B)
+
+## Validation / resolution logic
+
+Resolution precedence (simple, deterministic):
+
+1. per-field override (`fields["x"].units`)
+2. domain map (`units["distance"]`)
+3. scalar broadcast (`units="m"`)
+
+Same precedence applies for standard deviation.
+
+---
+
 # High-level API (as it stands)
 
 ## Creating a filter
@@ -214,7 +318,7 @@ kf = KalmanFilter(
     sensors=[
         Sensor(
             name="gps",
-            measures="POSITION",
+            measures="POSITION_2D",
             units="m",
             standard_deviation=2.5,
             outliers=Outliers.REJECT_LIKELY,
@@ -230,9 +334,9 @@ kf = KalmanFilter(
         ),
         Sensor(
             name="arkit_delta_pose",
-            measures="POSE",
-            units="m+deg/sample",
-            standard_deviation=0.05,  # (details TBD for multi-field measures)
+            measures="POSE_2D",
+            units={"distance": "m/sample", "angle": "deg/sample"},
+            standard_deviation={"distance": 0.05, "angle": 0.5},
             outliers=Outliers.REJECT_LIKELY,
             late_data=LateData.IGNORE,
         ),
@@ -252,12 +356,18 @@ Notes:
 User code pushes observations as data arrives:
 
 ```python
-kf.observe("gps", t=1000.00, x=1.2, y=-3.4)  # position in meters (example)
-kf.observe("yaw_rate", t=1000.01, yaw=12.0)  # deg/s
-kf.observe("arkit_delta_pose", t=1000.02, dx=0.03, dy=0.00, dyaw=0.2)
+kf.observe("gps", time=1000.00, values={"x": 1.2, "y": -3.4})
+kf.observe("yaw_rate", time=1000.01, values={"yaw": 12.0})
+kf.observe("arkit_delta_pose", time=1000.02, values={"x": 0.03, "y": 0.00, "yaw": 0.2})
 ```
 
-(Exact fields depend on `measures=...`; the library validates and parses them.)
+Optional per-sample quality can override sensor defaults:
+
+```python
+kf.observe("gps", time=1000.00, values={"x": 1.2, "y": -3.4}, accuracy={"x": 1.0, "y": 1.0})
+```
+
+(Exact fields depend on `measures=...`; the library validates them.)
 
 Key rule:
 
