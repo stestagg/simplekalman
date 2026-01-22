@@ -305,10 +305,7 @@ Same precedence applies for standard deviation.
 Bob wants to fuse three sensors into one `MotionEstimate`.
 
 ```python
-from simplekalman import KalmanFilter
-from simplekalman.estimates import MotionEstimate
-from simplekalman.policies import Outliers, LateData
-from simplekalman import Sensor
+from simplekalman import KalmanFilter, MotionEstimate, Outliers, LateData, Sensor
 
 kf = KalmanFilter(
     estimate=MotionEstimate(
