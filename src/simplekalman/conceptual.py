@@ -3,33 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from enum import Enum
-from math import pi
 from typing import Callable, Iterable, Protocol
 
 from .late_data import LateData
 from .motion_estimate import MotionEstimate
 from .outliers import Outliers
 from .sensor import Sensor
-
-
-class Semantics(Enum):
-    """Interpretation of a measurement value."""
-
-    ABSOLUTE = "absolute"
-    RATE_PER_S = "rate_per_s"
-    DELTA_PER_SAMPLE = "delta_per_sample"
-
-
-@dataclass(frozen=True)
-class UnitDescriptor:
-    """Parsed unit description and conversion to internal units."""
-
-    raw_unit: str
-    base_unit: str
-    semantics: Semantics
-    scale: float
-    internal_unit: str
+from .units import Semantics, UnitDescriptor, UnitSystem
 
 
 @dataclass(frozen=True)
@@ -189,46 +169,6 @@ class Kernel(Protocol):
         """Update the belief with a measurement."""
 
 
-class UnitSystem:
-    """Unit parsing and conversion to internal units."""
-
-    @staticmethod
-    def parse(unit: str) -> UnitDescriptor:
-        """Parse a unit string into a UnitDescriptor."""
-        normalized = unit.strip().lower()
-        semantics = Semantics.ABSOLUTE
-        base = normalized
-        suffix = ""
-        if "/s" in normalized or "per_s" in normalized or "per_sec" in normalized:
-            semantics = Semantics.RATE_PER_S
-            base = normalized.split("/")[0].split("per_")[0]
-            suffix = "/s"
-        elif "/sample" in normalized or "per_sample" in normalized:
-            semantics = Semantics.DELTA_PER_SAMPLE
-            base = normalized.split("/")[0].split("per_")[0]
-            suffix = "/sample"
-
-        base = base.strip()
-        scale = 1.0
-        internal_base = base
-        if base in {"deg", "degree", "degrees"}:
-            internal_base = "rad"
-            scale = pi / 180.0
-        elif base in {"rad", "radian", "radians"}:
-            internal_base = "rad"
-        elif base in {"m", "meter", "meters"}:
-            internal_base = "m"
-
-        internal_unit = f"{internal_base}{suffix}"
-        return UnitDescriptor(
-            raw_unit=unit,
-            base_unit=internal_base,
-            semantics=semantics,
-            scale=scale,
-            internal_unit=internal_unit,
-        )
-
-
 class SensorCompiler:
     """Compile sensor configuration into explicit specs."""
 
@@ -240,13 +180,13 @@ class SensorCompiler:
         if sensor.measures not in self._schemas:
             raise ValueError(f"Unknown schema: {sensor.measures}")
         schema = self._schemas[sensor.measures]
-        units = self._expand_per_field(sensor.units, schema.field_names())
-        sigmas = self._expand_per_field(sensor.standard_deviation, schema.field_names())
+        units = self._expand_per_field(sensor.units, schema.fields)
+        sigmas = self._expand_per_field(sensor.standard_deviation, schema.fields)
         fields: list[FieldSpec] = []
         for field in schema.fields:
             unit_str = units[field.name]
             sigma = sigmas[field.name]
-            unit_desc = UnitSystem.parse(unit_str)
+            unit_desc = UnitSystem.parse(unit_str, kind=field.kind)
             to_internal = self._scale_to_internal(unit_desc.scale)
             from_internal = self._scale_from_internal(unit_desc.scale)
             fields.append(
@@ -268,13 +208,17 @@ class SensorCompiler:
     @staticmethod
     def _expand_per_field(
         value: str | dict[str, str] | float | dict[str, float],
-        field_names: Iterable[str],
+        fields: tuple[FieldSchema, ...],
     ) -> dict[str, str] | dict[str, float]:
+        field_names = [f.name for f in fields]
         if isinstance(value, dict):
-            missing = [name for name in field_names if name not in value]
-            if missing:
-                raise ValueError(f"Missing field values for {missing}")
-            return value
+            # Keys are kind names (e.g., "distance", "angle")
+            result: dict[str, str] | dict[str, float] = {}
+            for field in fields:
+                if field.kind not in value:
+                    raise ValueError(f"Missing value for kind '{field.kind}'")
+                result[field.name] = value[field.kind]
+            return result
         return {name: value for name in field_names}
 
     @staticmethod

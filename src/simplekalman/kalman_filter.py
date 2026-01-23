@@ -17,9 +17,7 @@ class KalmanFilter:
     ) -> None:
         self.estimate = estimate
         self.sensors = sensors
-        self._sensor_registry: dict[str, Sensor] = {s.name: s for s in sensors}
-        self._compiler = FilterCompiler()
 
-    def compile_program(self) -> FilterProgram:
-        """Compile configuration into a conceptual filter program."""
-        return self._compiler.compile(self.estimate, self.sensors)
+        # Compile immediately
+        compiler = FilterCompiler()
+        self._program: FilterProgram = compiler.compile(estimate, sensors)
