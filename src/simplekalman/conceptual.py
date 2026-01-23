@@ -7,6 +7,7 @@ from typing import Callable, Iterable, Protocol
 
 from .late_data import LateData
 from .motion_estimate import MotionEstimate
+from .numeric import LinearBelief, initialize_belief, predict as numeric_predict, update as numeric_update
 from .outliers import Outliers
 from .sensor import Sensor
 from .units import Semantics, UnitDescriptor, UnitSystem
@@ -169,6 +170,28 @@ class Kernel(Protocol):
         """Update the belief with a measurement."""
 
 
+@dataclass(frozen=True)
+class LinearKalmanKernel:
+    """Linear Kalman filter kernel built on numeric primitives."""
+
+    descriptor: StateDescriptor
+
+    def predict(self, belief: object, dt: float, process: ProcessPreset) -> object:
+        if not isinstance(belief, LinearBelief):
+            raise TypeError("LinearKalmanKernel expects LinearBelief state.")
+        return numeric_predict(belief, dt, process, self.descriptor)
+
+    def update(
+        self,
+        belief: object,
+        plan: MeasurementPlan,
+        observation: NormalizedObservation,
+    ) -> object:
+        if not isinstance(belief, LinearBelief):
+            raise TypeError("LinearKalmanKernel expects LinearBelief state.")
+        return numeric_update(belief, plan, observation)
+
+
 class SensorCompiler:
     """Compile sensor configuration into explicit specs."""
 
@@ -278,6 +301,13 @@ class PlanCompiler:
 
     @staticmethod
     def _map_target(field_name: str, semantics: Semantics) -> str:
+        if semantics == Semantics.RATE_PER_S:
+            if field_name == "yaw":
+                return "state.heading_rate.yaw_rate"
+            if field_name == "x":
+                return "state.velocity.vx"
+            if field_name == "y":
+                return "state.velocity.vy"
         if field_name in {"x", "y"} and semantics == Semantics.DELTA_PER_SAMPLE:
             return f"state.position.{field_name}"
         if field_name in {"x", "y"}:
@@ -417,9 +447,13 @@ class FilterCompiler:
         sensor_specs = [self._sensor_compiler.compile(sensor) for sensor in sensors]
         state_descriptor, process_preset = self._estimate_compiler.compile(estimate)
         plans = PlanCompiler.compile(sensor_specs)
+        kernel = LinearKalmanKernel(descriptor=state_descriptor)
+        state = RuntimeState(belief=initialize_belief(state_descriptor))
         return FilterProgram(
             sensor_specs={spec.name: spec for spec in sensor_specs},
             state_descriptor=state_descriptor,
             process_preset=process_preset,
             plans=plans,
+            kernel=kernel,
+            state=state,
         )

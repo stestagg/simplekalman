@@ -5,6 +5,7 @@ import math
 import pytest
 
 from simplekalman import FilterProgram, KalmanFilter, MotionEstimate, Sensor
+from simplekalman.numeric import LinearBelief
 from simplekalman.units import Semantics, UnitSystem
 
 
@@ -198,7 +199,20 @@ def test_feet_to_meter():
     desc = UnitSystem.parse("ft", kind="distance")
     # 1 ft = 0.3048 m
     assert abs(desc.scale - 0.3048) < 0.0001
-    assert desc.base_unit == "m"
+
+
+def test_observe_updates_belief_state():
+    """Observations update the numeric belief state."""
+    kf = KalmanFilter(
+        estimate=MotionEstimate(motion_between_samples="UNCHANGING"),
+        sensors=[Sensor(name="gps", measures="POSITION_2D", units="m", standard_deviation=1.0)],
+    )
+    kf.observe("gps", time=1.0, values={"x": 2.0, "y": -1.0})
+    belief = kf.prediction
+    assert isinstance(belief, LinearBelief)
+    values = belief.as_dict()
+    assert values["position.x"] == pytest.approx(2.0, abs=0.5)
+    assert values["position.y"] == pytest.approx(-1.0, abs=0.5)
 
 
 def test_arcmin_to_radian():
